@@ -1,0 +1,14 @@
+/* Reference: https://create-react-app.dev/docs/adding-css-reset */
+@import-normalize;
+
+
+/* Define the base css styling for html tags */
+html, body {
+  box-sizing: border-box;
+  -moz-box-sizing: border-box;
+  -webkit-box-sizing: border-box;
+}
+
+a {
+  text-decoration: none;
+}
