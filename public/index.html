@@ -25,10 +25,19 @@
       Learn how to configure a non-root public URL by running `npm run build`.
     -->
     <title>React App</title>
+    <!--
+      threejs usage
+    -->
+    <link rel="stylesheet" type="text/css" href="assets/css/example.css">
+    <link rel="stylesheet" type="text/css" href="assets/css/LoadingScreen.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.7/dat.gui.min.js" integrity="sha512-LF8ZB1iTwi4Qvkm4pekHG4a437Y9Af5ZuwbnW4GTbAWQeR2E4KW8WF+xH8b9psevV7wIlDMx1MH9YfPqgKhA/Q==" crossorigin="anonymous"></script>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
     <div id="root"></div>
+    <div id="viewerDiv"></div>
+    <span id="divScaleWidget"> Scale </span>
+    <div id="miniDiv"></div>
     <!--
       This HTML file is a template.
       If you open it directly in the browser, you will see an empty page.
@@ -39,5 +48,10 @@
       To begin the development, run `npm start` or `yarn start`.
       To create a production bundle, use `npm run build` or `yarn build`.
     -->
+    <script src="https://www.itowns-project.org/itowns/dist/debug.js"></script>
+    <script src="https://www.itowns-project.org/itowns/dist/itowns.js"></script>
+    <script src="/js/GUI/LoadingScreen.js"></script>
+    <script src="/js/GUI/GuiTools.js"></script>
+    <script src="/js/main.js"></script>
   </body>
 </html>
