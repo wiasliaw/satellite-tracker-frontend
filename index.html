@@ -1,0 +1,879 @@
+<html>
+    <head>
+        <title>Itowns - Globe</title>
+
+        <meta charset="UTF-8">
+        <link rel="stylesheet" type="text/css" href="css/example.css">
+
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <script src="js/GUI/dat.gui/dat.gui.min.js"></script>
+    </head>
+    <body>
+        <div id= "help" class="help">
+                <p>Infos</p>
+                <ul>
+                </ul>
+            </div>
+        <div id="viewerDiv"></div>
+        <script src="js/GUI/GuiTools.js"></script>
+        <script src="dist/itowns.js"></script>
+
+
+
+        <script type="text/javascript"> let module = {exports:0};
+         </script>
+         <!-- <script src="https://rawgit.com/joshuaferrara/node-sgp4/master/sgp4.js"></script> -->
+        <script src="https://cdn.jsdelivr.net/npm/sgp4@1.0.10/sgp4.min.js"></script>
+        <script src="js/loading_screen.js"></script>
+        <script src="dist/debug.js"></script>
+        <script type="text/javascript">
+
+            // Define initial camera position
+            // Coordinate can be found on https://www.geoportail.gouv.fr/carte
+            // setting is "coordonnée geographiques en degres decimaux"
+            var positionOnGlobe = { longitude: 4.22, latitude: 44.844, altitude: 10000000 };
+
+            // `viewerDiv` will contain iTowns' rendering area (`<canvas>`)
+            var viewerDiv = document.getElementById('viewerDiv');
+
+            // Instanciate iTowns GlobeView*
+            var globeView = new itowns.GlobeView(viewerDiv, positionOnGlobe, {noControls: false});
+            
+            var promises = [];
+
+            var menuGlobe = new GuiTools('menuDiv', globeView);
+            setupLoadingScreen(viewerDiv, globeView);
+
+            function addLayerCb(layer) {
+                return globeView.addLayer(layer);
+            }
+            // Add one imagery layer to the scene
+            // This layer is defined in a json file but it could be defined as a plain js
+            // object. See Layer* for more info.
+            promises.push(itowns.Fetcher.json('./layers/JSONLayers/Ortho.json').then(addLayerCb));
+                        // Add two elevation layers.
+            // These will deform iTowns globe geometry to represent terrain elevation.
+            //promises.push(itowns.Fetcher.json('./layers/JSONLayers/WORLD_DTM.json').then(addLayerCb));
+            //promises.push(itowns.Fetcher.json('./layers/JSONLayers/IGN_MNT_HIGHRES.json').then(addLayerCb));
+
+            // Create satellite mesh (sphere)
+            /*
+                var THREE = itowns.THREE;
+                var geometry = new THREE.SphereGeometry(80000, 12, 12);
+                var material = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+                var meshSatellite = new THREE.Mesh(geometry, material);
+                globeView.scene.add(meshSatellite);
+            */
+            var THREE = itowns.THREE;
+            var ISSCoordinates;
+            var ISSSpeed;
+            var liveOn = true;  // Real time positioning
+            var overISS = false; // Lock camera to always view ISS 
+            var lookAtISS = false;
+            var satelliteModel;
+            var controls;
+            var globalTime;
+            var trajectory;
+            var precomputedTraj = {t0:0, interval:1, arrSatPos:[], arrSatSpeed:[]}; // Satellite precomputed positions, speeds and time interval
+            var allTrajVisible = false;
+            var lastPosition = new THREE.Vector3();  // Last known Satellite position
+            var motionDirection = new THREE.Vector3(); // Satellite direction of motion
+            var spotLight = new THREE.SpotLight( 0xfff1c9, 1., 500000, 60);  // SpotLight following ISS
+            var solarPanels = []; //new THREE.Object3D(); // Future Reference to the satellite solar panels
+            var sunSphere;
+            var clouds;  // PointCloud sprite for volumetric clouds
+            var radarTex; // Texture from radar satellite imagery for clouds
+            var globalIterator = 0; // Time used for animation
+            var incCloudSpeed = 1;  // Basic inc for clouds motion speed
+            
+
+            // Load a gltf model
+            function loadModel(url){
+
+                var loader = new THREE.GLTFLoader();
+                // Load a glTF resource
+                loader.load(
+                    // resource URL
+                    url,
+                    // called when the resource is loaded
+                    function ( gltf ) {
+
+                        satelliteModel = gltf.scene;
+                        satelliteModel.scale.set(100,100,100);
+                        satelliteModel.updateMatrixWorld();
+                        globeView.scene.add( satelliteModel );
+                        satelliteModel.position.copy(ISSCoordinates);
+                        //console.log("satelliteModel scale: ", satelliteModel.scale);
+
+                        //satelliteModel.scale.set(100,100,100);
+
+                        gltf.animations; // Array<THREE.AnimationClip>
+                        gltf.scene; // THREE.Scene
+                        gltf.scenes; // Array<THREE.Scene>
+                        gltf.cameras; // Array<THREE.Camera>
+                        gltf.asset; // Object
+
+                        // We look for the 4 solar panel child mesh from the model
+                        // We extract them (add a pivot to their vertices) so they have their own frame
+                        satelliteModel.traverse( function(child) {
+                            if (child.name.includes("ObjectsModulespaportinpapi-ani_w_goldcellslwo1")) {
+                                for (var a = 0; a<4; ++a){
+                                    var m = child.children[a];
+                                    solarPanels.push(m);
+                                    var pos = m.geometry.attributes.position.array;
+                                    for(var i = 0; i< pos.length; i+=3){
+                                        pos[i+2] += 1350;
+                                    }
+                                   m.position.z -=1350;
+                                }
+                            }
+
+                            if (child.name.includes("ObjectsModulespastbdinpasi-ani_w_goldcellslwo1")) {
+                                for (var a = 0; a<4; ++a){
+                                    var m = child.children[a];
+                                    solarPanels.push(m);
+                                    var pos = m.geometry.attributes.position.array;
+                                    for(var i = 0; i< pos.length; i+=3){
+                                        pos[i+2] -= 1350;
+                                    }
+                                   m.position.z +=1350;
+                                }
+        
+                            }
+
+                             if (child.name.includes("ObjectsModulespaportoutpapo-ani_w_goldcellslwo1")) {
+                                for (var a = 0; a<4; ++a){
+                                    var m = child.children[a];
+                                    solarPanels.push(m);
+                                    var pos = m.geometry.attributes.position.array;
+                                    for(var i = 0; i< pos.length; i+=3){
+                                        pos[i+2] += 1850;
+                                    }
+                                   m.position.z -=1850;
+                                }
+                            }
+
+                            if (child.name.includes("ObjectsModulespastbdoutpaso-ani_w_goldcellslwo1")) {
+                                for (var a = 0; a<4; ++a){
+                                    var m = child.children[a];
+                                    solarPanels.push(m);
+                                    var pos = m.geometry.attributes.position.array;
+                                    for(var i = 0; i< pos.length; i+=3){
+                                        pos[i+2] -= 1950;
+                                    }
+                                   m.position.z +=1950;
+                                }
+                            }
+
+                        });
+
+                       
+                        
+                    },
+                    // called while loading is progressing
+                    function ( xhr ) {
+
+                        console.log( ( xhr.loaded / xhr.total * 100 ) + '% loaded' );
+
+                    },
+                    // called when loading has errors
+                    function ( error ) {
+
+                        console.log( 'An error happened' );
+
+                    }
+                );
+            }
+
+            function placeCamera(position, lookAt) {
+                globeView.camera.camera3D.position.set(position.x, position.y, position.z);
+                globeView.camera.camera3D.lookAt(lookAt);
+                // create controls
+                controls = new itowns.FirstPersonControls(globeView, { focusOnClick: true });
+             //   debugGui.add(controls.options, 'moveSpeed', 1, 100).name('Movement speed');
+
+                globeView.notifyChange(globeView.camera.camera3D);
+             }
+
+
+             function addCloudSatelliteImagery(){
+                // Beware, the latitude values are acting weird. GetCap says minx="-90.0658" maxx="89.9779" but it seems unstable           
+                // radarTex = new THREE.TextureLoader().load("iss/clouds.png");
+                radarTex = new THREE.TextureLoader().load("http://realearth.ssec.wisc.edu/api/image?products=globalir&bounds=-89,-180,89,180&width=2048&height=2048");
+                var cloudMaterial = new THREE.MeshLambertMaterial({alphaMap:radarTex, lights:true, reflectivity: 1, transparent:true, opacity:1. });
+
+
+                var sphere = new THREE.Mesh(new THREE.SphereGeometry(1.002, 64, 64).scale(6378137,6356752.3142451793,6378137), cloudMaterial);
+
+                // Transforming sphere geometry for mercator projected texture
+                for ( var i = 0, l = sphere.geometry.faceVertexUvs[ 0 ].length; i < l; i ++ ) {
+                    for ( var j = 0, jl = sphere.geometry.faceVertexUvs[ 0 ][ i ].length; j < jl; j ++ ) {
+                        var uv = sphere.geometry.faceVertexUvs[ 0 ][ i ][ j ];
+                        var a = uv.y * Math.PI - Math.PI / 2;
+                        a = Math.sin(a);
+                        uv.y = Math.log( ( 1 + a ) / ( 1 - a ) ) / ( 6 * Math.PI ); // normally: / (4 * Math.PI)
+                        uv.y += 0.5;
+                    }
+                }
+                sphere.rotation.x = Math.PI/2;
+                sphere.updateMatrixWorld();
+                globeView.scene.add(sphere);
+             }
+
+            function getImageData( image ) {
+
+                var canvas = document.createElement( 'canvas' );
+                canvas.width = image.width;
+                canvas.height = image.height;
+
+                var context = canvas.getContext( '2d' );
+                context.drawImage( image, 0, 0 );
+
+                return context.getImageData( 0, 0, image.width, image.height );
+
+            }
+
+            function getPixel( imagedata, x, y ) {
+
+                var position = ( x + imagedata.width * y ) * 4, data = imagedata.data;
+                return { r: data[ position ], g: data[ position + 1 ], b: data[ position + 2 ], a: data[ position + 3 ] };
+
+            }
+
+
+            // Create a points cloud representing the satellite trajectory
+            function createTrajectory3D(){
+               
+               const trajVertexShader = `
+                    
+                    #include <logdepthbuf_pars_vertex>
+
+                   // attribute float alpha;
+                    attribute float date;  // Milliseconds timing of position minus original launched time
+                    attribute vec3 color;
+                   // attribute vec3 posMotion;
+                   
+                    uniform vec4 origin;
+                    uniform vec3 sunPos;
+                    uniform bool allTrajVisible;
+                    uniform sampler2D radarImg;
+                    uniform float time;  // Current time in milliseconds minus orignal launched time
+                    uniform vec3 currentSatPos;
+                    varying float angle;  
+                    varying vec3 vColor;  
+                    varying float vDate;
+
+                    void main() 
+                    {
+
+                        vColor = color;
+                        vDate = date;
+
+                        vec3 pos = position ;//+ (posMotion - position) * sin(scale * time/200.);
+
+                        vec4 mvPosition = modelViewMatrix * vec4( pos, 1.0 );
+                        float cameraDist = distance( mvPosition, origin );
+                        float size = 40000000.0 / cameraDist;
+                        gl_PointSize =  size;
+
+                        if(time - date > 0.) gl_PointSize = max(4. * size - clamp((time - date) / 10000., size, 4. * size), size);
+
+                        // Lighting
+                        angle = dot(sunPos, normalize(pos));
+                        
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.);
+                        #include <logdepthbuf_vertex>
+                    }
+                        
+                `;
+
+                const trajFragmentShader = `
+                    
+                    #include <logdepthbuf_pars_fragment>
+
+                    uniform sampler2D tDiffuse;
+                    uniform bool allTrajVisible;
+                    uniform float time;
+                  //  uniform sampler2D radarImg;
+                    uniform vec3 sunPos;
+                    varying float angle;  
+                    varying vec3 vColor;  
+                    varying float vDate;
+
+                    void main() 
+                    {
+                        #include <logdepthbuf_fragment>
+                        vec4 col = texture2D(tDiffuse, gl_PointCoord);
+                        gl_FragColor = vec4( vColor , col.a);   
+                        if (!allTrajVisible && vDate - time > 0.) gl_FragColor.a = 0.;
+                        //float alpha = gl_FragColor.a;
+                        //gl_FragColor.a -= clamp((time - vDate) / 1000000.,0., alpha);
+                        
+                        
+                    }
+                        
+                `;
+
+                var geometry = new THREE.BufferGeometry();
+                var positions = [];
+                var colors = [];
+                var alphas = [];
+                var date = [];
+                var dist = 6400000;
+                var nbPoints = 1000000;
+                var thresholdLuminance = 0.1;//.15;
+               
+                var arrPos = precomputedTraj.arrSatPos;
+                var start = precomputedTraj.t0;
+                var inc = precomputedTraj.interval;
+
+                for (var i = 0; i < arrPos.length; ++i){
+                    positions.push(arrPos[i].x, arrPos[i].y, arrPos[i].z);
+                    date.push(i * inc);
+                    var c = new THREE.Color().setHSL( i/arrPos.length, 0.9, 0.7 ); 
+                    colors.push(c.r, c.g, c.b);
+                }     
+
+                geometry.addAttribute( 'position', new THREE.Float32BufferAttribute( positions, 3 ) );
+                geometry.addAttribute( 'color', new THREE.Float32BufferAttribute( colors, 3 ) );
+                geometry.addAttribute( 'date', new THREE.Float32BufferAttribute( date, 1 ) );
+                geometry.computeBoundingSphere();
+                        
+                var shaderMaterial = new THREE.ShaderMaterial( {
+
+                    uniforms: { 
+                        tDiffuse: {type: "t", value: new THREE.TextureLoader().load("iss/spark.png")},
+                        radarImg: {type: "t", value: radarTex},
+                        allTrajVisible : {value: allTrajVisible},
+                        sunPos: new THREE.Uniform(globeView.sun.position),
+                        time: new THREE.Uniform(globalTime),
+                        currentSatPos:  {value: ISSCoordinates},
+                    },
+                    vertexShader: trajVertexShader,
+                    fragmentShader: trajFragmentShader,
+
+                } );
+
+                shaderMaterial.transparent = true;
+                shaderMaterial.sortParticles = true;
+                shaderMaterial.sizeAttenuation = false;
+                shaderMaterial.depthWrite = false;
+                // shaderMaterial.blending = THREE.NormalBlending;
+        
+                trajectory = new THREE.Points( geometry, shaderMaterial);
+                globeView.scene.add( trajectory );
+            }
+
+
+
+            // Create clouds using points out of a Radar satellite image
+            function addVolumetricClouds(){
+
+                 const cloudsVertexShader = `
+                    
+                    #include <logdepthbuf_pars_vertex>
+
+                    attribute float alpha;
+                    attribute float scale;
+                    attribute vec3 posMotion;
+                    uniform vec4 origin;
+                    uniform vec3 sunPos;
+                    uniform sampler2D radarImg;
+                    uniform float time;
+                    varying float angle;  
+                    varying float vAlpha;  
+
+                    void main() 
+                    {
+                      
+                        vAlpha = alpha;
+
+                        vec3 pos = position + (posMotion - position) * sin(scale * time/200.);
+
+                        vec4 mvPosition = modelViewMatrix * vec4( pos, 1.0 );
+                        float cameraDist = distance( mvPosition, origin );
+                        gl_PointSize = max(scale,0.6) * 210000000.0 / cameraDist;
+                    
+                        // Lighting
+                        angle = dot(sunPos, normalize(pos));
+                        
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.);
+                        #include <logdepthbuf_vertex>
+                    }
+                        
+                `;
+
+                const cloudsFragmentShader = `
+                    
+                    #include <logdepthbuf_pars_fragment>
+                    //varying vec3 vNormal;
+                    //varying float distStart;
+
+                    
+                    uniform sampler2D tDiffuse;
+                    uniform sampler2D radarImg;
+                    uniform vec3 sunPos;
+                    varying float angle;  
+                    varying float vAlpha;  
+
+                    void main() 
+                    {
+                        #include <logdepthbuf_fragment>
+                        vec4 col = texture2D(tDiffuse, gl_PointCoord);
+                        gl_FragColor = vec4(col.rgb * 1.2, col.a);     
+                        gl_FragColor.a *=  pow(angle, 2.) *  vAlpha * 2.;
+                        if (angle < 0. ) gl_FragColor.a = 0.;
+                    }
+                        
+                `;
+
+                var geometry = new THREE.BufferGeometry();
+                var positions = [];
+                var posMotions = [];
+                var alphas = [];
+                var scales = [];
+                var dist = 6400000;
+                var nbPoints = 1000000;
+                var thresholdLuminance = 0.1; // .15;
+
+
+                radarTex = new THREE.TextureLoader().load("https://realearth.ssec.wisc.edu/api/image?products=globalir&bounds=-89,-180,89,180&width=2048&height=2048",// onLoad callback
+                    function ( texture ) {
+                    
+                        var imagedata = getImageData( texture.image );
+                        var w = imagedata.width;
+                        var h = imagedata.height;
+                        var minY = 0; // imagedata.width / 7;
+                        var maxY = h; // 6 * imagedata.width / 7;
+
+                        for(var i = 0; i < w; i+=1){
+
+                            for(var j = minY; j < maxY; j+=1){
+
+                                    var a = (j/h) * Math.PI - Math.PI / 2;
+                                    a = Math.sin(a);
+                                    var uvy = Math.log(( 1 + a ) / ( 1 - a )) / (6* Math.PI); // normally: / (4 * Math.PI)
+                                    uvy += 0.5;       
+                                    // Get pixel real:
+                                    var p = getPixel(imagedata, i, Math.floor(uvy * h));
+                                    // Enhance contrast using a Sigmoid function
+                                    
+                                    var v = p.r / 255; if (i == 500 && j == 50 ) console.log("a",p,v);
+                                    //  v = v*2 - 1;
+                                    //  v = 1 / (1 + Math.exp(-v)) -0.5; 
+                                    v = 0.5 + 2 * (v - 0.5);
+                                    if (i == 500 && j == 50 ) console.log("b",p,v);
+                                    // we subsample more around the poles and filter light clouds
+                                    if(v > thresholdLuminance && Math.random() * j > h/12 &&  (1+Math.random()) * j <  6*h/8 /*&& Math.random()>0.5*/){
+                                        // We got coords i,y between 0,1
+                                        var teta = Math.PI + i/w * 2 * Math.PI;
+                                        var phi  = (j/h) * Math.PI; //uvy * Math.PI;
+                                        // Introduce noise
+                                        teta += Math.random() * 0.005;
+                                        phi += Math.random() * 0.005;
+                                        // Using spherical coords we compute cartesian coordinates
+                                        var d = dist + Math.random() * 2000;  // add noise to altitude and other coords optionally
+                                        var x = d * Math.sin(phi) * Math.cos(teta) //+ Math.random() * 10000;
+                                        var y = d * Math.sin(phi) * Math.sin(teta) //+ Math.random() * 10000;
+                                        var z = d * Math.cos(phi) //+ Math.random() * 100;
+                                        // Ugly motion position precomputed
+                                        var phi2 = phi + Math.random()/100;
+                                        var teta2 =  teta + Math.random()/100;
+                                        var d2 = d + Math.random() * 2000;
+                                        var x2 = d2 * Math.sin(phi2) * Math.cos(teta2) //+ Math.random() * 10000;
+                                        var y2 = d2 * Math.sin(phi2) * Math.sin(teta2) //+ Math.random() * 10000;
+                                        var z2 = d2 * Math.cos(phi2) //+ Math.random() * 100;;
+                                        positions.push( x, y, z );
+                                        posMotions.push(x2, y2, z2);
+                                        alphas.push( v );
+                                        scales.push(Math.random()); // Used to introduce irregular clouds size and also for motion
+                                    }
+                            
+                            }
+
+                        }
+                        console.log(positions.length/3);
+                        geometry.addAttribute( 'position', new THREE.Float32BufferAttribute( positions, 3 ) );
+                        geometry.addAttribute( 'posMotion', new THREE.Float32BufferAttribute( posMotions, 3 ) );
+                        geometry.addAttribute( 'alpha', new THREE.Float32BufferAttribute( alphas, 1 ) );
+                        geometry.addAttribute( 'scale', new THREE.Float32BufferAttribute( scales, 1 ) );
+                        geometry.computeBoundingSphere();
+                        
+                        var shaderMaterial = new THREE.ShaderMaterial( {
+
+                            uniforms: { 
+                                tDiffuse: {type: "t", value: new THREE.TextureLoader().load("iss/cloudTexture.png")},
+                                radarImg: {type: "t", value: radarTex},
+                                sunPos: new THREE.Uniform(globeView.sun.position),
+                                time: new THREE.Uniform(globalIterator)
+                            },
+                            vertexShader: cloudsVertexShader,
+                            fragmentShader: cloudsFragmentShader,
+
+                        } );
+                        shaderMaterial.transparent = true;
+                        shaderMaterial.sortParticles = true;
+                        shaderMaterial.sizeAttenuation = false;
+                        shaderMaterial.depthWrite = false;
+                        shaderMaterial.blending = THREE.NormalBlending;
+                
+                        clouds = new THREE.Points( geometry, shaderMaterial/*starsMaterial*/ );
+                        //clouds.rotation.x = Math.PI/2;
+                       // clouds.updateMatrixWorld();
+                        globeView.scene.add( clouds );
+
+                    },
+
+                );
+                
+
+
+                // We create one 3D particle for each pixel of cloud in the image using an intensity check and specifying an alpha
+            //    console.log(radarTex);
+/*
+				for ( var i = 0; i < nbPoints; i ++ ) {
+                    var d = dist + Math.random() * 500;
+                    var teta = Math.random() * 2 * Math.PI;
+                    var phi  = Math.random() * Math.PI;
+                    var x = d * Math.sin(teta) * Math.cos(phi);
+                    var y = d * Math.sin(teta) * Math.sin(phi);
+                    var z = d * Math.cos(teta);
+                    positions.push( x, y, z );
+                    alphas.push( new THREE.Vector2(teta,phi) );
+                }
+                */
+
+
+             }
+
+
+             function addStars(){
+                var texture = new THREE.TextureLoader().load("iss/starmap_8k.jpg");
+                var starsMaterial = new THREE.MeshBasicMaterial({map:texture, side:THREE.DoubleSide, transparent:true, opacity: 1, blending:THREE.NoBlending});
+                var sphere = new THREE.Mesh(new THREE.SphereGeometry(250000000, 64, 64), starsMaterial);
+                globeView.scene.add(sphere);
+             }
+
+             function addSun(){
+				sunSphere = new THREE.Mesh(
+					new THREE.SphereBufferGeometry( 200000, 16, 8 ),
+					new THREE.MeshBasicMaterial( { color: 0xffffff } )
+				);
+				//globeView.scene.add( sunSphere );
+             }
+
+
+            function getsunpos(){
+                date = new Date();
+                var rad = 0.017453292519943295;
+                // based on NOAA solar calculations
+                var mins_past_midnight = (date.getUTCHours() * 60 + date.getUTCMinutes()) / 1440;
+                var jc = (((date.getTime() / 86400000.0) + 2440587.5) - 2451545)/36525;
+                var mean_long_sun = (280.46646+jc*(36000.76983+jc*0.0003032)) % 360;
+                var mean_anom_sun = 357.52911+jc*(35999.05029-0.0001537*jc);
+                var sun_eq = Math.sin(rad*mean_anom_sun)*(1.914602-jc*(0.004817+0.000014*jc))+Math.sin(rad*2*mean_anom_sun)*(0.019993-0.000101*jc)+Math.sin(rad*3*mean_anom_sun)*0.000289;
+                var sun_true_long = mean_long_sun + sun_eq;
+                var sun_app_long = sun_true_long - 0.00569 - 0.00478*Math.sin(rad*125.04-1934.136*jc);
+                var mean_obliq_ecliptic = 23+(26+((21.448-jc*(46.815+jc*(0.00059-jc*0.001813))))/60)/60;
+                var obliq_corr = mean_obliq_ecliptic + 0.00256*Math.cos(rad*125.04-1934.136*jc);
+                var lat = Math.asin(Math.sin(rad*obliq_corr)*Math.sin(rad*sun_app_long)) / rad;
+                var eccent = 0.016708634-jc*(0.000042037+0.0000001267*jc);
+                var y = Math.tan(rad*(obliq_corr/2))*Math.tan(rad*(obliq_corr/2));
+                var rq_of_time = 4*((y*Math.sin(2*rad*mean_long_sun)-2*eccent*Math.sin(rad*mean_anom_sun)+4*eccent*y*Math.sin(rad*mean_anom_sun)*Math.cos(2*rad*mean_long_sun)-0.5*y*y*Math.sin(4*rad*mean_long_sun)-1.25*eccent*eccent*Math.sin(2*rad*mean_anom_sun))/rad);
+                var true_solar_time = (mins_past_midnight*1440+rq_of_time) % 1440;
+                var lng = -((true_solar_time/4 < 0) ? true_solar_time/4 + 180 : true_solar_time/4 - 180);
+                return {sunlat:lat, sunlon:lng};
+            }
+
+            function changeSpeedTime(){
+                console.log("changetime",liveOn);
+                liveOn = !liveOn;
+                liveOn ? incCloudSpeed = 1 : incCloudSpeed = 10;
+
+            }
+
+            function changeCamPosition(){
+                overISS = !overISS;
+                // globeView.controls.setRange(120000,true); // Nice slow motion
+                // globeView.controls.setTilt(60, true);
+                //globeView.controls.setCameraTargetPosition(ISSCoordinates, true);
+
+            }
+
+            function camLookAtISS(){
+                lookAtISS = !lookAtISS;
+            }
+
+            
+
+            // Function to precompute satetllite positions for satellite satRec between two dates t0, t1 (in milliseconds since 70') every t milliseconds
+            //{t0:0, interval:1, arrSatPos:[]}; // Satellite precomputed positions object
+            function precomputeSatPos(satRec, t0, t1, t){
+                precomputedTraj.interval = t;
+                precomputedTraj.t0 = t0;
+                var arrSatPos = precomputedTraj.arrSatPos;
+                var arrSatSpeed = precomputedTraj.arrSatSpeed;
+                //console.log(t0, t1, t);
+                for(var i = t0; i < t1; i += t){
+                    var time = new Date(i);
+                    //time.setSeconds(time.getSeconds() + t);
+                   // console.log(t0, time);
+                     // This will contain ECI (http://en.wikipedia.org/wiki/Earth-centered_inertial) coordinates of position and velocity of the satellite
+                     var positionAndVelocity = SGP4.propogate(satRec, time.getUTCFullYear(), time.getUTCMonth() + 1, time.getUTCDate(), time.getUTCHours(), time.getUTCMinutes(), time.getUTCSeconds());
+                    // GMST required 
+                    var gmst = SGP4.gstimeFromDate(time.getUTCFullYear(), time.getUTCMonth() + 1, time.getUTCDate(), time.getUTCHours(), time.getUTCMinutes(), time.getUTCSeconds());
+                    // Compute Earth centered frame coordinates
+                    var geodeticCoordinates = SGP4.eciToGeodetic(positionAndVelocity.position, gmst);
+                    var posECF = SGP4.eciToEcf(positionAndVelocity.position, gmst);
+                    ISSCoordinates = new THREE.Vector3(posECF.x, posECF.y, posECF.z).multiplyScalar(1000);
+                    arrSatPos.push(ISSCoordinates);
+                    arrSatSpeed.push(geodeticCoordinates.velocity * 3600);
+                }
+                console.log(precomputedTraj);
+            }
+
+
+            // Function to access precomputed position and speed and add interpolation
+            function getPosAndSpeedAtTime(t){
+                var p = precomputedTraj;
+                var pos;
+                var speed;
+                if(t > p.t0){
+                    var v = (t - p.t0) / (p.interval);
+                    var ind = Math.floor(v);
+                    var co = v - ind;
+                    var p1 = p.arrSatPos[ind];
+                    var p2 = p.arrSatPos[ind + 1];
+                    var px = p2.clone().sub(p1);
+                    pos = p1.clone().add( px.multiplyScalar(co));
+                    speed = p.arrSatSpeed[ind];
+                }
+                 else{
+                    pos = p.arrSatPos[0];
+                    speed = p.arrSatSpeed[0];
+                 }
+
+                return {pos:pos, speed:speed};
+            }
+
+
+            function showAllTraj(){
+                allTrajVisible = !allTrajVisible;
+                trajectory.material.uniforms.allTrajVisible.value = allTrajVisible;
+            }
+
+
+            // Listen for globe full initialisation event
+            globeView.addEventListener(itowns.GLOBE_VIEW_EVENTS.GLOBE_INITIALIZED, function globeInitialized() {
+                // eslint-disable-next-line no-console
+                console.info('Globe initialized');
+                Promise.all(promises).then(function init() {
+                    menuGlobe.addImageryLayersGUI(globeView.getLayers(function filterColor(l) { return l.type === 'color'; }));
+                    menuGlobe.addGUI('RealisticLighting', false, globeView.setRealisticLightingOn.bind(globeView));
+                    menuGlobe.addGUI('Time x 30', false, changeSpeedTime);
+                    menuGlobe.addGUI('Over ISS', false, changeCamPosition);
+                    menuGlobe.addGUI('look at ISS', false, camLookAtISS);
+                    menuGlobe.addGUI('24h trajectory', false, showAllTraj);
+
+
+                    // Sample ISS TLE Data from 24 august 2018 https://www.celestrak.com/NORAD/elements/stations.txt
+                    var issLine1 = "1 25544U 98067A   18235.94006556  .00000805  00000-0  19613-4 0  9991";
+                    var issLine2 = "2 25544  51.6425  41.0532 0005980  86.9575  34.3421 15.53864358129054";
+
+                    // Create a satellite record
+                    var issSatRec = SGP4.twoline2rv(issLine1, issLine2, SGP4.wgs84());
+                    // Precompute trajectory
+                    var t = Date.now();  // In milliseconds since midnight January 1, 1970
+                    var duration = 24 * 3600 * 1000; // One day duration in milliseconds
+                   // var b = Date.now();
+                    var endDate = t + duration;//new Date(t).setSeconds(t.getSeconds() + duration); console.log(t.getSeconds(), endDate);
+                    precomputeSatPos(issSatRec, t, endDate, 1000);
+
+
+
+                    console.log(globeView.camera);
+                    globeView.scene.add( spotLight );
+
+
+                //    var directionalLight = new THREE.DirectionalLight( 0xffffff, 0.5 );
+
+                    console.log(globeView);
+              //      globeView.scene.add( directionalLight );
+
+                    // Add clouds satellite IR Imagery
+                    // addCloudSatelliteImagery();
+                    addSun();
+                    addVolumetricClouds();
+
+                    // Show trajectory
+                    createTrajectory3D(precomputedTraj);
+
+                    // Add stars
+                    addStars();
+                    /*
+                    var cam = globeView.camera.camera3D.clone();
+                    globeView.camera.camera3D = null;
+                    globeView.camera.camera3D = new THREE.PerspectiveCamera( 45, 1920 / 1080, 10, 10000000 );
+                    globeView.camera.camera3D.position.set(8000000,8000000,8000000);
+                    globeView.camera.camera3D.updateMatrixWorld(true);
+                    globeView.camera.camera3D.lookAt( {x: 2511898.50816151, y: -3997639.5639961394, z: -4877003.964348924});//new itowns.THREE.Vector3(0, 0, 0));*/
+/*
+                    controls = new THREE.OrbitControls(globeView.camera.camera3D, viewerDiv);
+                    controls.minDistance = 1;
+                    controls.addEventListener('change', function _() { globeView.notifyChange(globeView.camera.camera3D); });
+                    globeView.controls = controls;
+             */       
+                    var inc = 0;
+
+                    
+                            // UGLY Line
+                            var material = new THREE.LineBasicMaterial({
+                                color: 0xaaaaaa,
+                                transparent:true,
+                                depthTest:false
+                            });
+
+                            var geometry = new THREE.Geometry();
+                            var geometryS = new THREE.SphereGeometry(12000, 6, 6);
+                            var materialS = new THREE.MeshBasicMaterial({ color: 0xf4427d, transparent: true, opacity: 0.6 });
+                           // var line = new THREE.Line( geometry, material );
+                          //  globeView.scene.add( line );
+
+
+                    var pivotObj = new THREE.Object3D();
+
+
+                    // This will compute position every second
+                    function getCurrentPosition() {
+          
+                        var now = Date.now();
+                        inc += 1000;  // 1 second later every frame refresh
+                        if(liveOn) inc = 0;
+                        // ugly increment for faster
+                        now += inc;
+                        var oldTime = now -  5*1000; // 5 seconds earlier
+                        globalTime = now;
+                        var speedAndPos = getPosAndSpeedAtTime(now);
+                        ISSCoordinates = speedAndPos.pos;
+                        ISSSpeed = speedAndPos.speed;
+                        lastPosition = getPosAndSpeedAtTime(oldTime).pos;
+ 
+                        // We compute satellite position and orientation
+                        if(satelliteModel){
+
+                            satelliteModel.position.copy(ISSCoordinates);
+                            satelliteModel.up = lastPosition;
+                            satelliteModel.lookAt(new THREE.Vector3(0,0,0));
+                            satelliteModel.rotateX(-Math.PI / 2);
+                            satelliteModel.rotateY(Math.PI / 2);
+                            satelliteModel.updateMatrixWorld();
+                         
+
+                            // We compute camera pos/ori depending on control options
+                            //   globeView.camera.camera3D.position.copy(ISSCoordinates.multiplyScalar(1.1));
+                            if(lookAtISS) 
+                                globeView.camera.camera3D.lookAt(ISSCoordinates);
+                            else
+                            if(overISS){
+                               // var 
+                                globeView.camera.camera3D.lookAt(ISSCoordinates);
+                                globeView.camera.camera3D.position.copy(ISSCoordinates.clone().multiplyScalar(1.10));
+                            }
+                            //   globeView.camera.camera3D.updateMatrixWorld(true);
+                            
+                            //   globeView.notifyChange(globeView.camera.camera3D);
+
+
+
+                        /*
+                            // Drawing the trajectory DEBUG
+                            var sphere = new THREE.Mesh(geometryS, materialS);
+                            sphere.position.copy(ISSCoordinates);
+                            sphere.updateMatrixWorld();
+                            globeView.scene.add(sphere);
+                        */
+                            // Illuminate the satellite
+                            spotLight.position.copy(ISSCoordinates.clone().multiplyScalar(1.02));
+                            spotLight.updateMatrixWorld();
+
+                            globeView.setSunPositionAtTime(new Date(now));
+                            for(var i = 0; i < solarPanels.length; ++i){
+                                solarPanels[i].lookAt(globeView.sun.position);
+                              //  solarPanels[i].updateMatrixWorld();
+                               // solarPanels[i].rotation.x += 0.1;
+                              //  solarPanels[i].updateMatrixWorld();
+                            }
+                           // console.log(satelliteModel.rotation.z /*, solarPanels[0].rotation.z*/);
+                            sunSphere.position.copy(globeView.sun.position.clone().multiplyScalar(100000000));
+                            sunSphere.updateMatrixWorld();
+
+                            if(clouds){
+                                clouds.material.uniforms.sunPos.value = globeView.sun.position;
+                                clouds.material.uniforms.time.value = globalIterator;
+                                globalIterator += incCloudSpeed;
+                            }
+
+                            if(trajectory){
+                                trajectory.material.uniforms.currentSatPos.value = ISSCoordinates;
+                                trajectory.material.uniforms.time.value = globalTime - precomputedTraj.t0;
+                            }
+
+                            // Display Infos
+                            document.getElementById('help').innerHTML = new Date(now).toDateString()+ " "+ new Date(now).toLocaleTimeString() + "<br />Speed: " + Number(ISSSpeed).toFixed(2) + "km/h";
+                           
+                            /*
+                            solarPanels[0].rotation.x += 0.1;
+                            solarPanels[0].updateMatrixWorld();
+                            */
+                          //  solarPanels[1].rotation.x += 0.1;
+                            
+
+                            //solarPanels.lookAt(globeView.sun.position);
+                   /*         
+                            // get position of the solar panel center
+                            var pivot = satelliteModel.position.clone().sub(new THREE.Vector3(0, 0, 1211.0985107421875));
+                            //pivotObj = new THREE.Object3D();
+                            
+                            pivotObj.position.copy(pivot);
+                            pivotObj.updateMatrixWorld();
+                            globeView.scene.add(pivotObj);
+                            
+                            pivotObj.add(solarPanels);
+
+                            pivotObj.rotation.x += 0.1;
+                          //  solarPanels.rotation.x += 0.1;
+
+                            var s = new THREE.Mesh(geometryS, new THREE.MeshBasicMaterial());
+                            s.position.copy(pivot);
+                            s.updateMatrixWorld();
+                            globeView.scene.add(s);
+                    */        
+                        }
+                        setTimeout(getCurrentPosition, 30);
+                    
+                    }
+                    getCurrentPosition();
+
+
+
+                    //globeView.controls.setTilt(60, true);
+                }).catch(console.error);
+            });
+
+            var script = document.createElement('script');
+            //var THREE = itowns.THREE;
+            script.type = 'text/javascript';
+            script.src = 'https://cdn.rawgit.com/mrdoob/three.js/r' + THREE.REVISION + '/examples/js/loaders/GLTFLoader.js';
+            script.onload = function l() {
+                loadModel('iss/scene.gltf');
+            };
+            document.body.appendChild(script);
+            
+            var script2 = document.createElement('script');
+            //var THREE = itowns.THREE;
+            script2.type = 'text/javascript';
+            script2.src = 'https://cdn.rawgit.com/mrdoob/three.js/r' + THREE.REVISION + '/examples/js/controls/OrbitControls.js';
+            document.body.appendChild(script2);
+        </script>
+    </body>
+</html>
